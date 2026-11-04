@@ -1,0 +1,96 @@
+name: Build Litum 4.2.5 TEST APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "build-input/**"
+      - ".github/workflows/build-android-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 34
+        run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Check build input
+        run: |
+          test -f build-input/Litum_Spravochnik_4_2_5_TEST_sources.zip
+          unzip -t build-input/Litum_Spravochnik_4_2_5_TEST_sources.zip
+
+      - name: Extract source project
+        run: |
+          mkdir -p "$RUNNER_TEMP/litum-source"
+          unzip -q build-input/Litum_Spravochnik_4_2_5_TEST_sources.zip -d "$RUNNER_TEMP/litum-source"
+          test -f "$RUNNER_TEMP/litum-source/Litum_Spravochnik_4_2_5_TEST/gradlew"
+          echo "PROJECT_DIR=$RUNNER_TEMP/litum-source/Litum_Spravochnik_4_2_5_TEST" >> "$GITHUB_ENV"
+
+      - name: Run JavaScript regression tests
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          node tests/colors_math.js
+          node tests/color_catalog.js
+          node tests/color_sync_compare.js
+          node tests/manual_catalog_sync.js
+          node tests/smart42.js
+          node tests/check_data.js
+          find app/src/main/assets -maxdepth 1 -name "*.js" -print0 | xargs -0 -n1 node --check
+
+      - name: Configure dedicated TEST signing key
+        env:
+          TEST_KEYSTORE_BASE64: ${{ secrets.LITUM_TEST_KEYSTORE_BASE64 }}
+          TEST_SIGNING_PASSWORD: ${{ secrets.LITUM_TEST_SIGNING_PASSWORD }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          test -n "$TEST_KEYSTORE_BASE64" || { echo "Missing GitHub secret LITUM_TEST_KEYSTORE_BASE64"; exit 1; }
+          test -n "$TEST_SIGNING_PASSWORD" || { echo "Missing GitHub secret LITUM_TEST_SIGNING_PASSWORD"; exit 1; }
+          printf '%s' "$TEST_KEYSTORE_BASE64" | base64 --decode > litum-test-signing.jks
+          keytool -list -keystore litum-test-signing.jks -storepass "$TEST_SIGNING_PASSWORD" -alias litum-test
+          printf 'storeFile=litum-test-signing.jks\nstorePassword=%s\nkeyAlias=litum-test\nkeyPassword=%s\n' "$TEST_SIGNING_PASSWORD" "$TEST_SIGNING_PASSWORD" > keystore.properties
+
+      - name: Build signed APK from source
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace clean :app:assembleRelease
+
+      - name: Verify APK package, alignment and signature
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/34.0.0/zipalign" -c -v 4 "$APK"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose --print-certs "$APK"
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | tee "$RUNNER_TEMP/apk-badging.txt"
+          grep -q "package: name='com.litum.brochure.test' versionCode='46' versionName='4.2.5-TEST'" "$RUNNER_TEMP/apk-badging.txt"
+          mkdir -p dist
+          cp "$APK" dist/Litum_Spravochnik_4_2_5_TEST.apk
+          sha256sum dist/Litum_Spravochnik_4_2_5_TEST.apk > dist/SHA256SUMS.txt
+          cat "$RUNNER_TEMP/apk-badging.txt" > dist/APK_PACKAGE_INFO.txt
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Litum-4.2.5-TEST-APK
+          path: ${{ env.PROJECT_DIR }}/dist/*
+          if-no-files-found: error
+          retention-days: 30
