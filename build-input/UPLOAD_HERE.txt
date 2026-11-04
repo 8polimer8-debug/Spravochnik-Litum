@@ -1,0 +1,1 @@
+Загрузите сюда архив Litum_Spravochnik_4_2_5_TEST_sources.zip. После загрузки GitHub Actions автоматически запустит полноценную Gradle-сборку.
